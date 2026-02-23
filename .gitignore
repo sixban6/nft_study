@@ -1,0 +1,14 @@
+# OS Specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor Specific
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
