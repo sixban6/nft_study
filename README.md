@@ -34,6 +34,11 @@
 * [第五阶段：NAT 与路由指针](05_stage5_nat.md)
 * [第六阶段：工程化、调试与最佳实践](06_stage6_best_practices.md)
 
+**扩展与实战：**
+* [扩展阶段一：iproute2 核心原理 (Linux 路由基石)](09_ext1_iproute2.md)
+* [扩展阶段二：nftables 与 iproute2 的梦幻联动 (黑魔法)](10_ext2_nft_iproute2.md)
+* [扩展阶段三：OpenWrt 环境下的硬核生存指南](11_ext3_openwrt.md)
+
 **附加内容：**
 * [复习与记忆巩固计划 (艾宾浩斯记忆法)](07_review_plan.md)
 * [期末测试演练卷 (含答案解析)](08_final_exam.md)

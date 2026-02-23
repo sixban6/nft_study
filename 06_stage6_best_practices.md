@@ -42,7 +42,7 @@ include "/etc/nftables/nat.nft"
 ### 第一招：`nft monitor` (实时监听规则变动)
 当你不想其他人随意动防火墙，或者诊断某些自动化程序（如 Docker 网络层）到底在底层偷偷动了什么手脚时：
 ```bash
-sudo nft monitor debug
+sudo nft monitor
 ```
 它会实时打印出所有通过底层 Netlink 协议对内核 `nftables` 的修改操作。
 

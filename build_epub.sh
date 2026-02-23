@@ -18,6 +18,9 @@ pandoc 01_stage1_basic.md \
        04_stage4_state_machine.md \
        05_stage5_nat.md \
        06_stage6_best_practices.md \
+       09_ext1_iproute2.md \
+       10_ext2_nft_iproute2.md \
+       11_ext3_openwrt.md \
        07_review_plan.md \
        08_final_exam.md \
        -o nftables_tutorial.epub \
