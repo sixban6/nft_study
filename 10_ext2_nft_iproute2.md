@@ -47,30 +47,88 @@ ip rule add fwmark 100 table 100
 
 ---
 
-## 3. 联动实战：手写纯净版旁路由 (Bypass Gateway)
+## 3. 联动实战：基于 Docker 的 TPROXY 透明代理验证
 
-我们来手写一个最简单的透明翻墙分流，这是很多透明代理插件底层的核心基石：使用 `fwmark` 结合 TPROXY 搭建纯血的旁路网关。
+我们来手写一个最简单的透明代理分流，这是所有科学上网插件（如 Clash、V2Ray Tun 模式）底层的核心基石：使用 `fwmark` 结合 TPROXY 搭建旁路网关。
 
-**前提条件：**
-我们本地有一个代理软件跑在 `12345` 端口处理 TPROXY，同时有一张标记表（包含你想代理的所有目的 IP）。
+为了直观验证，我们在任意空目录准备两个文件，利用 Docker 复现这一过程。
 
-**步骤 1: 准备好 100 号路由表，并配置好黑洞或透明本地回环路由**
-你要让 100 号表的流量，统统引流到了操作系统内核的一个虚拟空洞 `lo` (Local) 路由接口上。
-```bash
-ip rule add fwmark 100 lookup 100
-# 将带有 100 标记的全部塞回本机的 Local 回环网络
-ip route add local default dev lo table 100
+### 步骤 0：准备测试环境
+
+**第一步：准备 Python 写的假代理服务端 `tproxy_server.py`**
+TPROXY 与普通端口转发不同，接收端必须开启特殊的 `IP_TRANSPARENT` Socket 选项，否则内核会因为目标 IP 不是本机而拒收 SYN 握手包。
+```python
+# 文件：tproxy_server.py
+import socket
+
+IP_TRANSPARENT = 19 # Linux 下的 TPROXY 标志位
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.setsockopt(socket.IPPROTO_IP, IP_TRANSPARENT, 1) # 开启透明接收特权
+
+s.bind(('0.0.0.0', 12345))
+s.listen(5)
+print("TPROXY Server listening on port 12345...", flush=True)
+
+while True:
+    conn, addr = s.accept()
+    dest_ip, dest_port = conn.getsockname() # TPROXY 的魔法：这里能拿到客户端原本想访问的真实目的IP！
+    conn.recv(1024) # 消耗掉 HTTP GET 请求
+    
+    msg = f"HTTP/1.1 200 OK\r\n\r\nIntercepted connection from {addr[0]}:{addr[1]} destined for {dest_ip}:{dest_port}\n"
+    conn.sendall(msg.encode('utf-8'))
+    conn.close()
 ```
 
-**步骤 2: 配置 nftables TPROXY 劫持**
-数据包在 `prerouting` 这个最早的接入口，被 `nftables` 直接判定。如果是去国外的流量：
-1. 立马打上标记 `100`。
-2. 直接下达 `tproxy` 指令，强制把它塞给本机的 `12345` 端口的代理进程。
+**第二步：准备 `docker-compose.yml` 拓扑**
+我们设计一个局域网，包含一台网关路由器 (`tproxy_router`) 和一台无辜吃瓜群众 (`tproxy_client`)，吃瓜群众的网关指向这台路由器。
+```yaml
+services:
+  router:
+    image: alpine:latest
+    container_name: tproxy_router
+    cap_add: [NET_ADMIN]
+    sysctls: [net.ipv4.ip_forward=1]
+    volumes: ["./tproxy_server.py:/tproxy_server.py:ro"]
+    command: sh -c "apk add --no-cache iproute2 nftables python3 && python3 /tproxy_server.py & tail -f /dev/null"
+    networks:
+      lan: { ipv4_address: 10.10.10.254 }
 
+  client:
+    image: alpine:latest
+    container_name: tproxy_client
+    cap_add: [NET_ADMIN]
+    command: sh -c "apk add --no-cache curl && ip route del default || true && ip route add default via 10.10.10.254 && tail -f /dev/null"
+    networks:
+      lan: { ipv4_address: 10.10.10.2 }
+    depends_on: [router]
+
+networks:
+  lan:
+    ipam: { config: [{ subnet: 10.10.10.0/24 }] }
+```
+运行环境：`docker compose up -d`
+
+---
+
+### 步骤 1: 黑洞引流 (100号路由表)
+你要让 100 号表的流量，统统引流到了操作系统内核的一个虚拟空洞 `lo` (Local) 路由接口上。
 ```bash
-#!/usr/sbin/nft -f
-flush ruleset
+docker exec tproxy_router ip rule add fwmark 100 lookup 100
+# 将带有 100 标记的全部塞回本机的 Local 回环网络
+docker exec tproxy_router ip route add local default dev lo table 100
+```
 
+### 步骤 2: 配置 nftables TPROXY 劫持
+数据包在路由器 `prerouting` 最早的接入口，被 `nftables` 直接判定。如果是去国外的流量（我们模拟访问 `8.8.8.8`）：
+1. 立马打上标记 `100`。
+2. 下达 `tproxy` 指令，强制把它塞给本机的 `12345` 端口的代理进程。
+
+我们在主机目录下创建 `tproxy.nft`：
+```bash
+# 文件: tproxy.nft
+flush ruleset
 table inet mangle {
     chain prerouting {
         type filter hook prerouting priority mangle; policy accept;
@@ -81,9 +139,26 @@ table inet mangle {
     }
 }
 ```
+注入生效：
+```bash
+docker cp tproxy.nft tproxy_router:/tmp/tproxy.nft
+docker exec tproxy_router nft -f /tmp/tproxy.nft
+```
 
-**最终执行流：**
-数据包到达网卡 → 进入 `nftables prerouting` → 命中 8.8.8.8 规则，打上标志 100，并标记了 tproxy 属主 → 包往下走进入 `iproute2` → `ip rule fwmark 100` 命中 → 去查 100 号表 → 100 表将其交给 `lo` 接口送给本地 → 内核发现这个包有 tproxy 标记，于是被本地的 V2Ray/Clash 无损接收！
+### 步骤 3: 见证伟大的终极劫持
+
+打开你的被代理客户端，尝试毫无自觉地访问那台远古服务器（模拟）：
+```bash
+docker exec tproxy_client curl -s 8.8.8.8
+```
+
+不可思议的事情发生了，你的屏幕上赫然出现回显：
+```text
+Intercepted connection from 10.10.10.2:34316 destined for 8.8.8.8:80
+```
+
+**最终执行流全貌：**
+数据包（目的地 8.8.8.8）到达路由器网卡 `eth0` → 进入 `nftables prerouting` → 命中 8.8.8.8 规则，打上标志 100，并绑定 tproxy 属主目标 `127.0.0.1:12345` → 包往下走进入 `iproute2` → `ip rule fwmark 100` 命中 → 去查 100 号表 → 100 表将其交给 `lo` 接口送给本地栈 → 内核惊喜地发现这个包有 tproxy 特权章，于是无视了它目的 IP (8.8.8.8) 不在自己身上这个致命事实，乖乖地将连接交给了本地 12345 端口监听的 Python 脚本无损接管！
 
 这就是 Linux 极客们玩弄网络的艺术。有了全局变量的桥接，没有什么是不可拦截的。
 

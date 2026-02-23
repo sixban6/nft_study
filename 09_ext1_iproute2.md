@@ -69,46 +69,119 @@ $ ip rule show
 
 ---
 
-## 3. 路由实战：双线多拨与负载均衡
+## 3. 路由实战：基于 Docker 的双线多拨场景 (可复现)
 
-**背景描述：** 
-假设你的服务器插了两根网线：
-- `eth1`：电信宽带，IP为 10.1.1.2，网关 10.1.1.1
-- `eth2`：联通宽带，IP为 10.2.2.2，网关 10.2.2.1
+为了让你亲身体验 `iproute2` 的黑魔法，我们准备了一个极其逼真的 Docker 沙盒实验。
 
-如果你只在主表里设置一条默认网关，另一条宽带就永远荒废了。如果外部电信用户访问你的联通 IP，回包会被迫从主路由的电信网关怼出去，这叫反规则（Asymmetric routing），大部分运营商防火墙会直接将其丢弃。
+**实验拓扑：** 
+- **isp_router (ISP 核心路由)**: 模拟具备严格反欺骗（rp_filter=1）的运营商节点。拥有三个接口：Telecom (`10.101.1.254`)、Unicom (`10.102.2.254`)、Internet (`10.100.64.254`)。
+- **server (你的多线服务器)**: 插了两根网线，`eth0` (Telecom, `10.101.1.2`)，`eth1` (Unicom, `10.102.2.2`)。目前的默认网关只有 Telecom。
+- **client (外网游荡的用户)**: 位于公网 (`10.100.64.2`)，想访问你的服务器。
 
-### 实战演练：源地址策略路由 (原路进原路出)
+### 步骤 0：启动实验环境
+创建一个 `docker-compose.yml` 文件并启动：
 
-这是多线路由最经典的应用：“从哪张网卡进来的外网请求，回包也必须从哪张网卡回去”。
+```yaml
+services:
+  isp_router:
+    image: alpine:latest
+    container_name: isp_router
+    cap_add: [NET_ADMIN]
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.rp_filter=1
+      - net.ipv4.conf.default.rp_filter=1
+    command: sh -c "apk add --no-cache iproute2 tcpdump && tail -f /dev/null"
+    networks:
+      telecom: { ipv4_address: 10.101.1.254 }
+      unicom:  { ipv4_address: 10.102.2.254 }
+      internet:{ ipv4_address: 10.100.64.254 }
+
+  server:
+    image: alpine:latest
+    container_name: server
+    cap_add: [NET_ADMIN]
+    command: sh -c "apk add --no-cache iproute2 ping && ip route del default || true && ip route add default via 10.101.1.254 && tail -f /dev/null"
+    networks:
+      telecom: { ipv4_address: 10.101.1.2 }
+      unicom:  { ipv4_address: 10.102.2.2 }
+    depends_on: [isp_router]
+
+  client:
+    image: alpine:latest
+    container_name: client
+    cap_add: [NET_ADMIN]
+    command: sh -c "apk add --no-cache iproute2 ping && ip route del default || true && ip route add default via 10.100.64.254 && tail -f /dev/null"
+    networks:
+      internet: { ipv4_address: 10.100.64.2 }
+    depends_on: [isp_router]
+
+networks:
+  telecom:
+    ipam: { config: [{ subnet: 10.101.1.0/24 }] }
+  unicom:
+    ipam: { config: [{ subnet: 10.102.2.0/24 }] }
+  internet:
+    ipam: { config: [{ subnet: 10.100.64.0/24 }] }
+```
+终端执行：`docker compose up -d`
+
+---
+
+### 第一幕：体验网络不通的绝望 (Asymmetric routing)
+
+服务器 `server` 只有一条连向 Telecom 的默认网关。
+如果外网 `client` 访问你的 Telecom IP：
+```bash
+docker exec client ping -c 1 10.101.1.2
+# 结果：成功！包从电信口进，从电信口（默认网关）出。
+```
+
+但如果你访问它的 Unicom IP 呢？
+```bash
+docker exec client ping -c 1 10.102.2.2
+# 结果：100% packet loss (超时)！
+```
+**原因分析：** 包从联通口（eth1）进来了。但是服务器想回包时，它只认识主路由表里的电信默认网关！于是包被强行塞进了电信接口发给 `isp_router`。`isp_router` 发现：怎么从电信口跑出来一个源 IP 是联通段的脏数据？直接作为欺骗攻击丢弃（`rp_filter` 机制）。
+
+---
+
+### 第二幕：iproute2 策略路由破局 (原路进原路出)
+
+这是多线路由最经典的应用：“从哪张网卡进来的包，回包也必须从哪张网卡出去”。
 
 **步骤 1：创建两张自定义的私有路由表**
-我们在 `/etc/iproute2/rt_tables` 中给这些数字起个优雅的名字：
+我们在 `server` 容器里，给100号和200号表起个优雅的名字：
 ```bash
-echo "100 telecom" >> /etc/iproute2/rt_tables
-echo "200 unicom" >> /etc/iproute2/rt_tables
+docker exec server sh -c "mkdir -p /etc/iproute2 && echo '100 telecom' >> /etc/iproute2/rt_tables && echo '200 unicom' >> /etc/iproute2/rt_tables"
 ```
 
 **步骤 2：在私有表中填入专属网关 (指针定位)**
-让 100 号（电信）表只走电信网关，200 号（联通）表只走联通网关。
+让 telecom 表只走电信网关，unicom 表只走联通网关。
 ```bash
-# telecom 表：所有外网流量交给电信网关
-ip route add default via 10.1.1.1 table telecom
-# unicom 表：所有外网流量交给联通网关
-ip route add default via 10.2.2.1 table unicom
+docker exec server ip route add default via 10.101.1.254 table telecom
+docker exec server ip route add default via 10.102.2.254 table unicom
 ```
 
 **步骤 3：编写 ip rule (动态指针分发)**
-我们设定规则：看数据包的自身源 IP。如果该包的源 IP 是电信分配给我们的 IP，就必须去翻那张写满了电信规则的 `telecom` 路由表！
+我们设定规则：看数据包的自身源 IP。如果该包的源 IP 是电信分配给我们的 IP，就乖乖去翻那张写满了电信规则的 `telecom` 表！
 ```bash
-ip rule add from 10.1.1.2 lookup telecom
-ip rule add from 10.2.2.2 lookup unicom
+docker exec server ip rule add from 10.101.1.2 lookup telecom
+docker exec server ip rule add from 10.102.2.2 lookup unicom
 ```
 
+### 见证奇迹的时刻
+
+再次让外网客户端敲响那个原本打不通的联通 IP：
+```bash
+docker exec client ping -c 1 10.102.2.2
+```
+**结果：回显成功（TTL=63 time=0.0xx ms）！**
+
 **发生了什么？**
-当联通客户端向服务器的 `eth2` (联通, 10.2.2.2) 发起请求时。服务器要回复包，这个回复包的**源 IP**必然是 10.2.2.2，**目的 IP** 是客户端。
-当回复包要出站时，它来查路由。首先看 `ip rule`，优先级命中 `from 10.2.2.2`，于是它掉头去翻 `unicom` 表。
-`unicom` 表里写了 `default via 10.2.2.1`。
-完美！这个包毫无悬念地从联通线路（网关 10.2.2.1）飞出去了。
+当 `client` 请求服务器的未名口 (10.102.2.2) 时，服务器的回复包**源 IP**必然是 10.102.2.2。当回复包准备出站去查路由时，内核首先看到了 `ip rule` 拦截：
+“优先级命中 `from 10.102.2.2`，掉头去翻 `unicom` 表！”
+`unicom` 表里写了 `default via 10.102.2.254`。
+完美！这个包毫无悬念地从联通线路原路返回了，避开了所有运营商的反欺骗检测。
 
 这就是 `iproute2` 真正的底层统治力。它与 `nftables` 的梦幻联动，更将开启一片翻云覆雨的新天地。接下来请看 **《扩展阶段二：nftables 与 iproute2 的梦幻联动》**。

@@ -55,36 +55,109 @@ config include
 
 ---
 
-## 3. OpenWrt 终极实战：局域网设备的分流与隔离
+## 3. OpenWrt 终极实战：基于 Docker 的底层注入演练
 
 **需求挑战：** 
-家里有一台电视机（必须直连不受干扰）、一部客人的手机（只能上外网，绝不允许看你内网的 NAS 内容）、还有一台你用来管理一切的主力电脑。
+家里有一台电视机（必须绑定特权 MAC 不受干扰）、一部客人的手机（被分配到了 `192.168.1.200`，只允许上外网，绝不允许看内网 `nas_net` 下的内容），还有一台深藏功与名的 NAS。
 
-在传统的 OpenWrt 管理界面中处理“纯内网阻断”是非常笨拙的，但使用原生 `nftables` 就如同写了一段业务逻辑。
+在传统的 OpenWrt 管理界面中处理“纯内网阻断”是非常笨拙的，但使用原生 `nftables` 就如同写了一段业务逻辑。为了验证代码流，我们直接在 Docker 跑起一个包含 router, tv, guest, nas 四个容器的模拟局域网：
 
-在我们的 `/etc/my_custom.nft` 中，我们将规则附加在负责内网转发的链中（在 fw4 中常为 `forward` 链或其细分的 `forward_lan` 链）：
+### 步骤 0：启动实验拓扑
 
+创建一个 `docker-compose.yml`，我们给 TV 分配了一个独一无二的 MAC 地址 `00:11:22:33:44:55`：
+```yaml
+services:
+  router:
+    image: alpine:latest
+    container_name: openwrt_sim_router
+    cap_add: [NET_ADMIN]
+    sysctls: [net.ipv4.ip_forward=1]
+    command: sh -c "apk add --no-cache nftables && tail -f /dev/null"
+    networks:
+      lan: { ipv4_address: 192.168.1.254 }
+      nas_net: { ipv4_address: 192.168.2.254 }
+
+  tv:
+    image: alpine:latest
+    container_name: openwrt_sim_tv
+    mac_address: 00:11:22:33:44:55
+    cap_add: [NET_ADMIN]
+    command: sh -c "apk add --no-cache iproute2 iputils && ip route del default || true && ip route add default via 192.168.1.254 && tail -f /dev/null"
+    networks:
+      lan: { ipv4_address: 192.168.1.11 }
+    depends_on: [router]
+
+  guest:
+    image: alpine:latest
+    container_name: openwrt_sim_guest
+    cap_add: [NET_ADMIN]
+    command: sh -c "apk add --no-cache iproute2 iputils && ip route del default || true && ip route add default via 192.168.1.254 && tail -f /dev/null"
+    networks:
+      lan: { ipv4_address: 192.168.1.200 }
+    depends_on: [router]
+
+  nas:
+    image: alpine:latest
+    container_name: openwrt_sim_nas
+    cap_add: [NET_ADMIN]
+    command: sh -c "apk add --no-cache iproute2 iputils && ip route del default || true && ip route add default via 192.168.2.254 && tail -f /dev/null"
+    networks:
+      nas_net: { ipv4_address: 192.168.2.10 }
+    depends_on: [router]
+
+networks:
+  lan:
+    ipam: { config: [{ subnet: 192.168.1.0/24 }] }
+  nas_net:
+    ipam: { config: [{ subnet: 192.168.2.0/24 }] }
+```
+终端执行 `docker compose up -d` 启动环境。稍等数秒，待路由器的 `nftables` 安装完毕，并手工模拟 OpenWrt 祖传的 `fw4` 底层大表：
 ```bash
-# 在 inet fw4 的自定义链中进行分拣
-chain lan_guest_isolation {
-    
-    # 电视机的 MAC 地址：11:22:33:44:55:66 
-    # 客人手机的 IP 段：192.168.1.200-192.168.1.250
-    # 内网 NAS 网段：192.168.1.10
-    
-    # 隔离访客：源 IP 为客人，目的 IP 为你的 NAS，无情丢弃！(局域网内且跨网段，或隔离)
-    # 注意：如果客人在同网段且靠二层交换机直连，防火墙管不到，必须隔离 AP。这里假定跨网桥或三层隔离状态。
-    ip saddr 192.168.1.200-192.168.1.250 ip daddr 192.168.1.10 drop
-    
-    # 电视机免除一切处理，直接 accept 返还给内核发出去
-    ether saddr 11:22:33:44:55:66 accept
-    
-    # 其他流量默认放行
-    accept
+docker exec openwrt_sim_router nft add table inet fw4
+docker exec openwrt_sim_router nft 'add chain inet fw4 forward { type filter hook forward priority 0 ; policy accept ; }'
+```
+
+### 步骤 1：编写原生过滤脚本并注入
+
+在你的主机随意创建一个 `/etc/my_custom.nft` 或者当前目录下的 `my_custom.nft` 脚本：
+```bash
+#!/usr/sbin/nft -f
+# 文件: my_custom.nft
+table inet fw4 {
+    chain lan_guest_isolation {
+        # 隔离访客：源 IP 为客人区，目标为 NAS，无情丢弃！
+        ip saddr 192.168.1.200-192.168.1.250 ip daddr 192.168.2.10 drop
+        
+        # 电视机免除一切处理，直接 accept
+        ether saddr 00:11:22:33:44:55 accept
+    }
 }
 ```
-然后你需要把调用这个 `lan_guest_isolation` 的函数插到 `fw4` 的主 `forward` 钩子链中（如果不想依赖具体的 `fw4` 细分链，可以在文件开头自定义一个高优先级的钩子直接抢断）。
+把规则推给路由器并执行：
+```bash
+docker cp my_custom.nft openwrt_sim_router:/etc/my_custom.nft
+docker exec openwrt_sim_router nft -f /etc/my_custom.nft
+```
 
-通过这种底层嵌入式的代码注入，你可以直接将最高效的 `ether saddr`（MAC匹配）、IP段匹配注入 OpenWrt。
+然后，你需要把调用这个 `lan_guest_isolation` 的函数跳转挂载到 `fw4` 的主 `forward` 钩子链中：
+```bash
+docker exec openwrt_sim_router nft 'add rule inet fw4 forward jump lan_guest_isolation'
+```
 
-到这里，你不仅掌握了网络层逻辑，还拥有了路由指针的管理甚至熟练在 RTOS 级环境里做定制固件底包开发，真正的《网络黑魔法防御术》已经结业毕业！
+### 终极验证：冷酷的包过滤
+
+通过这种底层嵌入式的代码注入，你可以直接将最高效的 `ether saddr`（MAC匹配）、IP段匹配注入 OpenWrt 过滤栈中。我们来测试结果：
+
+1. **测试防贼防盗的客房设备：**
+```bash
+docker exec openwrt_sim_guest ping -c 1 -W 2 192.168.2.10
+# 结果：100% packet loss (因为命中 ip saddr drop，直接陨灭)
+```
+
+2. **测试尊贵的 MAC 级特权设备 (TV)：**
+```bash
+docker exec openwrt_sim_tv ping -c 1 -W 2 192.168.2.10
+# 结果：1 packets transmitted, 1 received, 0% packet loss (顺利通行！)
+```
+
+到这里，你不仅掌握了网络层核心逻辑，还具备了在 RTOS 级环境里做定制固件底包开发甚至黑客级 hook 注入的能力，真正的《网络黑魔法防御术》已经正式毕业结课！

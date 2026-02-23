@@ -1,0 +1,13 @@
+#!/usr/sbin/nft -f
+# 文件: my_custom.nft
+
+# 1. 定义我们的后门过滤链
+table inet fw4 {
+    chain lan_guest_isolation {
+        # 隔离访客：源 IP 为客人，目的 IP 为你的 NAS，无情丢弃！
+        ip saddr 192.168.1.200-192.168.1.250 ip daddr 192.168.2.10 drop
+        
+        # 电视机免除一切处理，直接 accept
+        ether saddr 00:11:22:33:44:55 accept
+    }
+}

@@ -1,0 +1,64 @@
+services:
+  isp_router:
+    image: alpine:latest
+    container_name: isp_router
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.rp_filter=1
+      - net.ipv4.conf.default.rp_filter=1
+    command: >
+      sh -c " apk add --no-cache iproute2 tcpdump && tail -f /dev/null "
+    networks:
+      telecom:
+        ipv4_address: 10.101.1.254
+      unicom:
+        ipv4_address: 10.102.2.254
+      internet:
+        ipv4_address: 10.100.64.254
+
+  server:
+    image: alpine:latest
+    container_name: server
+    cap_add:
+      - NET_ADMIN
+    command: >
+      sh -c " apk add --no-cache iproute2 iputils curl tcpdump && ip route del default || true && ip route add default via 10.101.1.254 && tail -f /dev/null "
+    networks:
+      telecom:
+        ipv4_address: 10.101.1.2
+      unicom:
+        ipv4_address: 10.102.2.2
+    depends_on:
+      - isp_router
+
+  client:
+    image: alpine:latest
+    container_name: client
+    cap_add:
+      - NET_ADMIN
+    command: >
+      sh -c " apk add --no-cache iproute2 iputils curl && ip route del default || true && ip route add default via 10.100.64.254 && tail -f /dev/null "
+    networks:
+      internet:
+        ipv4_address: 10.100.64.2
+    depends_on:
+      - isp_router
+
+networks:
+  telecom:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.101.1.0/24
+  unicom:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.102.2.0/24
+  internet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.64.0/24
