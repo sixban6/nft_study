@@ -1,7 +1,0 @@
-flush ruleset
-table inet mangle {
-    chain prerouting {
-        type filter hook prerouting priority mangle; policy accept;
-        meta l4proto tcp ip daddr 8.8.8.8 meta mark set 100 tproxy ip to 127.0.0.1:12345 accept
-    }
-}
