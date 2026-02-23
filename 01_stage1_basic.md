@@ -164,31 +164,42 @@ sudo nft list ruleset
 
 ### 测试你的 Hello World
 
-现在，我们需要验证防火墙是否生效了！我们使用宿主机作为客户端来发起探测：
+现在，我们需要验证防火墙是否生效了！由于 Windows 和 Mac 系统上的 Docker 运行在虚拟机中，宿主机无法直接 ping 通容器的内网 IP（如 `172.17.x.x`）。为了最真实、准确地测试防火墙规则，我们**再启动一个客户端容器**来发起探测：
 
-**1. 测试 Ping (预期被拦截)：**
-在你的宿主机（Mac 或 Linux）上，获取靶机的 IP 并尝试 Ping 它：
+**1. 准备测试客户端：**
+打开一个新的终端窗口：
 ```bash
-# 在宿主机上获取容器的 IP 地址
-docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nft-lab
+# 启动一个临时的测试容器，连接到默认 bridge 网络
+docker run -it --rm --network bridge alpine:latest /bin/sh
 
-# 尝试 Ping 这个 IP
-ping <容器IP>
+# 在测试容器内安装必需工具
+apk add iputils netcat-openbsd
+```
+
+**2. 测试 Ping (预期被拦截)：**
+在刚刚启动的**测试客户端容器**内部，尝试 Ping 被保护的靶机（`nft-lab`）：
+```bash
+# 获取 nft-lab 的 IP
+# 可以在宿主机执行：docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nft-lab
+# 假设获取到的 IP 是 172.17.0.2
+
+# 在测试客户端容器内尝试 Ping：
+ping 172.17.0.2
 ```
 你会发现：**请求超时！终端处于卡死（挂起）状态，因为你执行了 `drop`（把包丢进黑洞，没有任何回应）。**
 
-**2. 测试其他端口用 `nc` (预期被放行)：**
-因为我们在 `input` 链末尾设了 `policy accept`，所以没有被前面规则丢弃的流量应该都能进来。我们在容器里开个 Web 服务模拟端口（8080）：
+**3. 测试其他端口用 `nc` (预期被放行)：**
+因为我们在 `input` 链末尾设了 `policy accept`，所以没有被前面规则丢弃的流量应该都能进来。我们在 `nft-lab` 靶机中开个 Web 服务模拟端口（8080）：
 ```bash
 # 在 nft-lab 容器内部执行监听
 nc -l -p 8080
 ```
-然后在宿主机上用 `nc` 探测它：
+然后回到**测试客户端容器**中用 `nc` 探测它：
 ```bash
-# 在宿主机执行：
-nc -vz <容器IP> 8080
+# 在测试客户端容器执行：
+nc -vz 172.17.0.2 8080
 ```
-你会看到立刻返回：`Connection to <容器IP> port 8080 [tcp/*] succeeded!`。
+你会看到立刻返回：`Connection to 172.17.0.2 8080 port [tcp/*] succeeded!`。
 
 恭喜你！你已经通过实机验证，成功编写并运行了 `nftables` 版本的 "Hello World"。
 
