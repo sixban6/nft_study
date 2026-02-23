@@ -151,12 +151,15 @@ table inet filter {
 
 ### 验证 Vmap 字典分发机制
 
-在 `nft-lab` 容器内部，准备测试环境：
+在 `nft-lab` 容器内部，准备测试环境（**同样建议开三个不同的终端页分别前台运行**）：
+
 ```bash
-# 分别模拟 SSH、Web 和一个被严打的 telnet 服务
-nc -l -p 22 &
-nc -l -p 80 &
-nc -l -p 23 &
+# 终端 1
+docker exec -it nft-lab nc -l -p 22
+# 终端 2
+docker exec -it nft-lab nc -l -p 80
+# 终端 3
+docker exec -it nft-lab nc -l -p 23
 ```
 
 在**测试客户端容器**上进行实战探测：

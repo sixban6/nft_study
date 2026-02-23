@@ -150,12 +150,17 @@ table inet filter {
 
 ### 验证你的 Web 服务器防火墙
 
-我们在 Docker 靶机中启动几个后台监听服务，这相当于我们跑起来了 Web 服务和 SSH 服务：
+我们在 Docker 靶机中启动几个前台监听服务（**建议每开启一个端口，就在宿主机新开一个终端页执行**）：
+
 ```bash
-# 在 nft-lab 容器内执行：启动 80 和 22 端口，以及一个未授权的 8080 端口
-nc -l -p 80 &
-nc -l -p 22 &
-nc -l -p 8080 &
+# 终端 1: 启动合法的 Web 服务端口
+docker exec -it nft-lab nc -l -p 80
+
+# 终端 2: 启动限制源 IP 的 SSH 服务端口
+docker exec -it nft-lab nc -l -p 22
+
+# 终端 3: 启动一个未授权的测试端口
+docker exec -it nft-lab nc -l -p 8080
 ```
 
 回到之前准备好的**测试客户端容器**（即那个 `alpine` 容器），向靶机（假设 IP 为 `172.17.0.2`）发起测试：
